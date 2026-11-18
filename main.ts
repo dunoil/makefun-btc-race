@@ -15,6 +15,9 @@
 //     the capital instead of riding a dead position to the final flatten).
 //   No entries in the last 60 bars: a dip bought that late has no time to
 //     revert before the window's final sale.
+//   No entries after 30 consecutive flat bars (close == open): a dip
+//     measured against a stale rolling high while the feed is not moving is
+//     not a real dip, so wait for the market to move again before buying.
 //
 // Everything is deterministic: fixed thresholds, float64 arithmetic on the
 // bars only, no randomness, no wall clock, no network, no files. One asset
@@ -42,6 +45,8 @@ const STALE_BARS = 480;
 const STALE_GAIN_BPS = 20;
 /** No new entries once this many bars from the end of a 1440-bar window. */
 const NO_ENTRY_LAST_BARS = 60;
+/** Skip entries after this many consecutive flat bars (close == open). */
+const FLAT_BARS = 30;
 const WINDOW_BARS = 1440;
 /** 1% slippage cap: fills cost ~7 bps of impact, so a >1% gap rejects the
  *  order instead of filling it at a bad price; it is retried next bar. */
@@ -55,6 +60,8 @@ let entrySeq = -1;
 let entryPrice = 0;
 /** Whether we held a position on the previous batch. */
 let heldLastBatch = false;
+/** Consecutive bars whose close equals their open (stale-feed detector). */
+let flatStreak = 0;
 
 /** Average fill price of a position, in raw price units, from its cost/qty. */
 function fillPrice(state: BarsState, symbol: string): number {
@@ -81,6 +88,7 @@ await runBars({
     const close = Number(bar.c);
     closes.push(close);
     if (closes.length > LOOKBACK_BARS) closes.shift();
+    flatStreak = close === Number(bar.o) ? flatStreak + 1 : 0;
 
     const orders: (BuyInput | SellInput)[] = [];
     const { caps, fees } = state.hello;
@@ -96,10 +104,11 @@ await runBars({
       return orders;
     }
 
-    // Flat: buy the dip, once the rolling high exists and the window is not
-    // nearly over.
+    // Flat: buy the dip, once the rolling high exists, the window is not
+    // nearly over, and the feed has actually been moving.
     if (closes.length < LOOKBACK_BARS) return [];
     if (state.seq >= WINDOW_BARS - NO_ENTRY_LAST_BARS) return [];
+    if (flatStreak >= FLAT_BARS) return [];
     let high = closes[0]!;
     for (const c of closes) if (c > high) high = c;
     const dropBps = ((close / high) - 1) * 10_000;
